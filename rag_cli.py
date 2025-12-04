@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
 """
-Minimal RAG CLI usando OpenAI vector stores + Responses + file_search,
-com suporte a:
+Minimal RAG CLI usando OpenAI vector stores + Responses + file_search.
 
-- index PATH_OR_GLOB      (inclui .org -> .md automático via pandoc)
-- ask ...                 (pergunta única)
-- chat ...                (sessão interativa estilo ChatGPT)
-- list                    (lista índices cacheados por diretório/glob)
+Comandos principais:
+
+  python rag_cli.py index PATH_OR_GLOB
+      -> cria um vector store novo e indexa arquivos (md, txt, org, etc.)
+
+  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB
+      -> reusa o MESMO vector store daquela sessão e
+         INDEXA APENAS ARQUIVOS NOVOS (não reindexa repetidos)
+
+  python rag_cli.py ask auto "sua pergunta"
+  python rag_cli.py ask PATH_OR_GLOB "sua pergunta"
+  python rag_cli.py ask vs_abc123... "sua pergunta"
+
+  python rag_cli.py chat auto
+  python rag_cli.py chat PATH_OR_GLOB
+  python rag_cli.py chat vs_abc123...
+
+  python rag_cli.py list
+      -> lista sessões (PATH_OR_GLOB) e seus vector_store_ids
 
 Requer:
     pip install "openai>=1.90.0"
@@ -73,25 +87,54 @@ def load_api_key():
 client = OpenAI(api_key=load_api_key())
 
 
-# ---------- Cache de vector stores (por diretório/glob) ----------
+# ---------- Cache de vector stores (por diretório/glob) + arquivos indexados ----------
 
 VECTOR_STORE_CACHE_FILE = os.path.expanduser("~/.rag_vector_stores.json")
 
 
+def _empty_cache():
+    return {
+        "sessions": {},       # key -> vs_id
+        "files_per_vs": {},   # vs_id -> [abs_path, ...]
+        "_last": None         # último vs_id usado
+    }
+
+
 def _load_cache():
     path = VECTOR_STORE_CACHE_FILE
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    if not os.path.exists(path):
+        return _empty_cache()
+
+    try:
+        with open(path, "r") as f:
+            raw = json.load(f)
+    except Exception:
+        return _empty_cache()
+
+    # Se já tem formato novo (sessions/files_per_vs), só completa defaults
+    if isinstance(raw, dict) and ("sessions" in raw or "files_per_vs" in raw):
+        cache = _empty_cache()
+        cache["sessions"] = raw.get("sessions", {})
+        cache["files_per_vs"] = raw.get("files_per_vs", {})
+        cache["_last"] = raw.get("_last")
+        return cache
+
+    # Formato antigo: { "/path": "vs_...", "_last": "vs_..." }
+    cache = _empty_cache()
+    for k, v in raw.items():
+        if k.startswith("_"):
+            continue
+        cache["sessions"][k] = v
+    cache["_last"] = raw.get("_last")
+    return cache
 
 
 def _save_cache(cache):
+    # Garante chaves padrão
+    base = _empty_cache()
+    base.update(cache or {})
     with open(VECTOR_STORE_CACHE_FILE, "w") as f:
-        json.dump(cache, f, indent=2)
+        json.dump(base, f, indent=2)
 
 
 def canonical_key(path_or_glob):
@@ -109,14 +152,14 @@ def canonical_key(path_or_glob):
 
 def save_vector_store_id_for_key(key, vs_id):
     cache = _load_cache()
-    cache[key] = vs_id
-    cache["_last"] = vs_id  # último usado
+    cache["sessions"][key] = vs_id
+    cache["_last"] = vs_id
     _save_cache(cache)
 
 
 def load_vector_store_id_for_key(key):
     cache = _load_cache()
-    return cache.get(key)
+    return cache["sessions"].get(key)
 
 
 def load_last_vector_store_id():
@@ -124,41 +167,59 @@ def load_last_vector_store_id():
     return cache.get("_last")
 
 
+def add_indexed_files(vs_id, files):
+    """
+    Adiciona arquivos (paths absolutos) como já indexados para um vs_id.
+    Não duplica paths; mantém lista ordenada.
+    """
+    cache = _load_cache()
+    fps = cache.setdefault("files_per_vs", {})
+    existing = set(fps.get(vs_id, []))
+    new_abs = {os.path.abspath(p) for p in files}
+    combined = sorted(existing.union(new_abs))
+    fps[vs_id] = combined
+    _save_cache(cache)
+
+
+def get_indexed_files(vs_id):
+    """
+    Retorna um set de paths absolutos já indexados para esse vs_id.
+    """
+    cache = _load_cache()
+    fps = cache.get("files_per_vs", {})
+    return set(fps.get(vs_id, []))
+
+
 def list_vector_stores():
     cache = _load_cache()
-    if not cache:
+    sessions = cache.get("sessions", {})
+    if not sessions:
         print("No cached vector stores.")
         return
 
-    last = cache.get("_last")
+    last_vs = cache.get("_last")
 
     print(f"Cache file: {VECTOR_STORE_CACHE_FILE}\n")
     print("Cached vector stores (per directory/glob key):")
-    any_real = False
-    for key, vs_id in cache.items():
-        if key == "_last":
-            continue
-        any_real = True
-        marker = "  (last used)" if vs_id == last else ""
+    for key, vs_id in sessions.items():
+        marker = "  (last used)" if vs_id == last_vs else ""
         print(f"- {key} -> {vs_id}{marker}")
-    if not any_real:
-        print("  (none yet; index something first)")
 
 
 def resolve_vector_store_id(arg):
     """
     Resolve um argumento (auto, vs_..., path/glob) para um vector_store_id real.
     """
-    # auto -> último
+    # auto -> último vs_id
     if arg == "auto":
-        cached = load_last_vector_store_id()
-        if not cached:
+        vs = load_last_vector_store_id()
+        if not vs:
             raise RuntimeError(
                 "Nenhum vector store em cache.\n"
                 "Rode antes:\n"
                 "  python rag_cli.py index PATH_OR_GLOB"
             )
-        return cached
+        return vs
 
     # ID explícito
     if arg.startswith("vs_"):
@@ -166,15 +227,15 @@ def resolve_vector_store_id(arg):
 
     # path/glob -> chave de cache
     key = canonical_key(arg)
-    cached = load_vector_store_id_for_key(key)
-    if not cached:
+    vs = load_vector_store_id_for_key(key)
+    if not vs:
         raise RuntimeError(
             "Nenhum vector store em cache para essa chave:\n"
             f"  {key}\n"
             "Faça o índice antes com:\n"
             f"  python rag_cli.py index \"{arg}\""
         )
-    return cached
+    return vs
 
 
 # ---------- Tipos de arquivo suportados ----------
@@ -221,9 +282,9 @@ def show_cost_and_confirm(file_paths):
         f"(a US${EMBED_PRICE_PER_MILLION:.2f} por 1M tokens)"
     )
     print("(Estimativa grosseira; o billing real pode variar um pouco.)")
-    ans = input("Prosseguir com o índice e esse custo aproximado? [y/N]: ").strip().lower()
+    ans = input("Prosseguir com o índice/extensão e esse custo aproximado? [y/N]: ").strip().lower()
     if ans not in ("y", "yes", "s", "sim"):
-        print("Abortando indexação.")
+        print("Abortando operação.")
         sys.exit(0)
 
 
@@ -275,7 +336,7 @@ def prepare_file_for_upload(path):
         return path, None
 
 
-# ---------- Indexação: PATH ou GLOB ----------
+# ---------- Indexação: PATH ou GLOB (cria novo vector store) ----------
 
 def index_path_or_glob(path_or_glob):
     """
@@ -300,9 +361,12 @@ def index_path_or_glob(path_or_glob):
             continue
         ext = os.path.splitext(p)[1].lower()
         if ext in SUPPORTED_EXTENSIONS:
-            file_paths.append(p)
+            file_paths.append(os.path.abspath(p))
         else:
             skipped.append(p)
+
+    # remove duplicados
+    file_paths = sorted(set(file_paths))
 
     if not file_paths:
         raise RuntimeError(
@@ -325,6 +389,8 @@ def index_path_or_glob(path_or_glob):
     print(f"\nVector store criado: {vector_store_id}")
     print(f"Enviando {len(file_paths)} arquivos...")
 
+    indexed_success = []
+
     for path in file_paths:
         tmp_path = None
         try:
@@ -336,6 +402,7 @@ def index_path_or_glob(path_or_glob):
                     file=fp,
                 )
             print(f"  OK: {path} -> file_id={file_obj.id}")
+            indexed_success.append(path)
 
         except BadRequestError as e:
             print(f"  ERRO (400) para {path}: {e}")
@@ -350,17 +417,22 @@ def index_path_or_glob(path_or_glob):
                 except Exception:
                     pass
 
+    if indexed_success:
+        add_indexed_files(vector_store_id, indexed_success)
+
     print("Indexação concluída.")
     return vector_store_id
 
+
+# ---------- Extensão: anexar arquivos novos a um vector store existente ----------
 
 def extend_path_or_glob(vector_store_id, path_or_glob):
     """
     Anexa arquivos novos (ou não) a um vector_store já existente,
     usando um PATH_OR_GLOB arbitrário.
 
-    Não cria novo vector store e não mexe na chave de cache;
-    só envia arquivos para o vector_store_id passado.
+    NÃO reindexa arquivos já enviados para esse vector_store_id
+    (usa paths absolutos).
     """
     expanded = os.path.expanduser(os.path.expandvars(path_or_glob))
 
@@ -377,9 +449,12 @@ def extend_path_or_glob(vector_store_id, path_or_glob):
             continue
         ext = os.path.splitext(p)[1].lower()
         if ext in SUPPORTED_EXTENSIONS:
-            file_paths.append(p)
+            file_paths.append(os.path.abspath(p))
         else:
             skipped.append(p)
+
+    # remove duplicados
+    file_paths = sorted(set(file_paths))
 
     if not file_paths:
         raise RuntimeError(
@@ -393,11 +468,21 @@ def extend_path_or_glob(vector_store_id, path_or_glob):
             print("  ", p)
         print()
 
-    print(f"Encontrados {len(file_paths)} arquivos suportados para anexar.")
-    show_cost_and_confirm(file_paths)
+    # filtra só arquivos realmente novos para esse vs_id
+    already = get_indexed_files(vector_store_id)
+    new_files = [p for p in file_paths if p not in already]
+
+    if not new_files:
+        print("Nenhum arquivo novo para indexar; todos já estão neste vector store.")
+        return
+
+    print(f"Encontrados {len(new_files)} arquivos NOVOS para anexar.")
+    show_cost_and_confirm(new_files)
 
     print(f"\nAnexando arquivos ao vector store existente: {vector_store_id}")
-    for path in file_paths:
+    indexed_success = []
+
+    for path in new_files:
         tmp_path = None
         try:
             upload_path, tmp_path = prepare_file_for_upload(path)
@@ -408,6 +493,7 @@ def extend_path_or_glob(vector_store_id, path_or_glob):
                     file=fp,
                 )
             print(f"  OK: {path} -> file_id={file_obj.id}")
+            indexed_success.append(path)
 
         except BadRequestError as e:
             print(f"  ERRO (400) para {path}: {e}")
@@ -421,6 +507,9 @@ def extend_path_or_glob(vector_store_id, path_or_glob):
                     shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
                 except Exception:
                     pass
+
+    if indexed_success:
+        add_indexed_files(vector_store_id, indexed_success)
 
     print("Extensão concluída.")
 
@@ -518,13 +607,13 @@ def main(argv):
     if len(argv) < 2:
         print("Uso:")
         print("  python rag_cli.py index PATH_OR_GLOB")
+        print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
         print("  python rag_cli.py ask VECTOR_STORE_ID \"sua pergunta\"")
         print("  python rag_cli.py ask auto \"sua pergunta\"          # último índice")
         print("  python rag_cli.py ask PATH_OR_GLOB \"sua pergunta\"  # índice por diretório/glob")
         print("  python rag_cli.py chat auto                        # chat interativo com último índice")
         print("  python rag_cli.py chat PATH_OR_GLOB                # chat interativo com índice daquele path")
         print("  python rag_cli.py list                             # lista índices cacheados")
-        print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
         sys.exit(1)
 
     cmd = argv[1]
@@ -541,6 +630,25 @@ def main(argv):
         print(f"Key: {key}")
         print(f"ID : {vs_id}")
         print(f"Salvo em: {VECTOR_STORE_CACHE_FILE}")
+
+    elif cmd == "extend":
+        if len(argv) != 4:
+            print("Uso:")
+            print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
+            print()
+            print("Exemplo:")
+            print("  python rag_cli.py extend \"$HOME/mdroam\" \"$HOME/mdroam/novas/**/*.org\"")
+            sys.exit(1)
+
+        session_key = argv[2]
+        new_pattern = argv[3]
+
+        vector_store_id = resolve_vector_store_id(session_key)
+        extend_path_or_glob(vector_store_id, new_pattern)
+
+        # marca esse vs como último usado
+        key = canonical_key(session_key)
+        save_vector_store_id_for_key(key, vector_store_id)
 
     elif cmd == "ask":
         if len(argv) < 4:
@@ -566,41 +674,12 @@ def main(argv):
         vector_store_id = resolve_vector_store_id(arg2)
         chat(vector_store_id)
 
-    elif cmd == "extend":
-        # Exemplo de uso:
-        #   python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB
-        #
-        # Onde PATH_OR_GLOB_EXISTENTE é a "sessão" já indexada
-        # (a mesma string que você usou no index da primeira vez),
-        # e NOVOS_ARQUIVOS_GLOB é o glob/diretório com os arquivos novos.
-
-        if len(argv) != 4:
-            print("Uso:")
-            print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
-            print()
-            print("Exemplo:")
-            print("  python rag_cli.py extend \"$HOME/mdroam\" \"$HOME/mdroam/novas-notas/**/*.org\"")
-            sys.exit(1)
-
-        session_key = argv[2]
-        new_pattern = argv[3]
-
-        # Resolve o vector_store_id da sessão existente
-        vector_store_id = resolve_vector_store_id(session_key)
-
-        # Anexa os novos arquivos ao mesmo vector store
-        extend_path_or_glob(vector_store_id, new_pattern)
-
-        # Opcional: marcar este vector store como o _last no cache
-        key = canonical_key(session_key)
-        save_vector_store_id_for_key(key, vector_store_id)
-
     elif cmd == "list":
         list_vector_stores()
 
     else:
         print(f"Comando desconhecido: {cmd}")
-        print("Use 'index', 'ask', 'chat' ou 'list'.")
+        print("Use 'index', 'extend', 'ask', 'chat' ou 'list'.")
         sys.exit(1)
 
 
