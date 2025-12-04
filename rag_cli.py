@@ -603,23 +603,31 @@ def chat(vector_store_id):
 
 # ---------- CLI ----------
 
+def print_help():
+    print("Uso:")
+    print("  python rag_cli.py index PATH_OR_GLOB")
+    print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
+    print("  python rag_cli.py ask VECTOR_STORE_ID \"sua pergunta\"")
+    print("  python rag_cli.py ask auto \"sua pergunta\"          # último índice")
+    print("  python rag_cli.py ask PATH_OR_GLOB \"sua pergunta\"  # índice por diretório/glob")
+    print("  python rag_cli.py chat auto                        # chat interativo com último índice")
+    print("  python rag_cli.py chat PATH_OR_GLOB                # chat interativo com índice daquele path")
+    print("  python rag_cli.py list                             # lista índices cacheados")
+    print()
+    print("Opções:")
+    print("  -h, --help   Mostra esta ajuda e sai.")
+
+
 def main(argv):
-    if len(argv) < 2:
-        print("Uso:")
-        print("  python rag_cli.py index PATH_OR_GLOB")
-        print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
-        print("  python rag_cli.py ask VECTOR_STORE_ID \"sua pergunta\"")
-        print("  python rag_cli.py ask auto \"sua pergunta\"          # último índice")
-        print("  python rag_cli.py ask PATH_OR_GLOB \"sua pergunta\"  # índice por diretório/glob")
-        print("  python rag_cli.py chat auto                        # chat interativo com último índice")
-        print("  python rag_cli.py chat PATH_OR_GLOB                # chat interativo com índice daquele path")
-        print("  python rag_cli.py list                             # lista índices cacheados")
-        sys.exit(1)
+    # Sem argumentos ou com -h/--help -> ajuda geral
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print_help()
+        sys.exit(0)
 
     cmd = argv[1]
 
     if cmd == "index":
-        if len(argv) != 3:
+        if len(argv) != 3 or argv[2] in ("-h", "--help"):
             print("Uso: python rag_cli.py index PATH_OR_GLOB")
             sys.exit(1)
         pattern = argv[2]
@@ -632,7 +640,7 @@ def main(argv):
         print(f"Salvo em: {VECTOR_STORE_CACHE_FILE}")
 
     elif cmd == "extend":
-        if len(argv) != 4:
+        if len(argv) != 4 or argv[2] in ("-h", "--help") or argv[3] in ("-h", "--help"):
             print("Uso:")
             print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
             print()
@@ -651,7 +659,7 @@ def main(argv):
         save_vector_store_id_for_key(key, vector_store_id)
 
     elif cmd == "ask":
-        if len(argv) < 4:
+        if len(argv) < 4 or argv[2] in ("-h", "--help"):
             print("Uso: python rag_cli.py ask VECTOR_STORE_ID \"sua pergunta\"")
             print("     python rag_cli.py ask auto \"sua pergunta\"")
             print("     python rag_cli.py ask PATH_OR_GLOB \"sua pergunta\"")
@@ -664,7 +672,7 @@ def main(argv):
         print(answer)
 
     elif cmd == "chat":
-        if len(argv) < 3:
+        if len(argv) < 3 or argv[2] in ("-h", "--help"):
             print("Uso: python rag_cli.py chat auto")
             print("     python rag_cli.py chat PATH_OR_GLOB")
             print("     python rag_cli.py chat VECTOR_STORE_ID")
@@ -675,11 +683,15 @@ def main(argv):
         chat(vector_store_id)
 
     elif cmd == "list":
+        if len(argv) > 2 and argv[2] in ("-h", "--help"):
+            print("Uso: python rag_cli.py list")
+            sys.exit(1)
         list_vector_stores()
 
     else:
         print(f"Comando desconhecido: {cmd}")
-        print("Use 'index', 'extend', 'ask', 'chat' ou 'list'.")
+        print()
+        print_help()
         sys.exit(1)
 
 
