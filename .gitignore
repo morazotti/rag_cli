@@ -1,2 +1,3 @@
 /src/rag_cli/__pycache__/
 /uv.lock
+*.~undo-tree~
