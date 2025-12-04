@@ -5,7 +5,8 @@ from glob import glob
 from typing import List
 
 from .client import client, BadRequestError
-from .config import SUPPORTED_EXTENSIONS, DEFAULT_MODEL
+from .config import SUPPORTED_EXTENSIONS, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT
+
 from .cache import (
     canonical_key,
     save_vector_store_id_for_key,
@@ -173,14 +174,29 @@ def extend_path_or_glob(vector_store_id: str, path_or_glob: str) -> None:
     print("Extensão concluída.")
 
 
-def ask(vector_store_id: str, question: str) -> str:
+def ask(
+    vector_store_id: str,
+    question: str,
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> str:
     """
     Pergunta única usando RAG no vector_store_id dado.
+    model: nome do modelo (se None, usa DEFAULT_MODEL)
+    system_prompt: texto de prompt inicial / system message opcional
     """
+    if system_prompt is None:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": question})
+
     try:
         response = client.responses.create(
-            model=DEFAULT_MODEL,
-            input=question,
+            model=model or DEFAULT_MODEL,
+            input=messages,
             tools=[{
                 "type": "file_search",
                 "vector_store_ids": [vector_store_id],
@@ -199,15 +215,26 @@ def ask(vector_store_id: str, question: str) -> str:
     return response.output_text
 
 
-def chat(vector_store_id: str) -> None:
+def chat(
+    vector_store_id: str,
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> None:
     """
     Sessão de chat interativa no terminal usando o mesmo vector_store_id,
-    com histórico local.
+    com histórico local e, opcionalmente, um system prompt fixo.
     """
+    if system_prompt is None:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+
     print(f"Iniciando chat com vector_store_id = {vector_store_id}")
     print("Digite sua pergunta. Comandos: /exit, /quit, /sair, /clear\n")
 
     history: list[dict[str, str]] = []
+
+    # Se tiver system prompt, colocamos no início do histórico
+    if system_prompt:
+        history.append({"role": "system", "content": system_prompt})
 
     while True:
         try:
@@ -223,7 +250,10 @@ def chat(vector_store_id: str) -> None:
             print("Saindo do chat.")
             break
         if user_input.lower() == "/clear":
-            history.clear()
+            # limpamos o histórico, mas mantemos o system prompt se existir
+            history = []
+            if system_prompt:
+                history.append({"role": "system", "content": system_prompt})
             print("(Histórico limpo.)")
             continue
 
@@ -231,7 +261,7 @@ def chat(vector_store_id: str) -> None:
 
         try:
             response = client.responses.create(
-                model=DEFAULT_MODEL,
+                model=model or DEFAULT_MODEL,
                 input=messages,
                 tools=[{
                     "type": "file_search",

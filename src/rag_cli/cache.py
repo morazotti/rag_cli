@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Iterator, Tuple
 
 from .config import VECTOR_STORE_CACHE_PATH
 
@@ -94,6 +94,16 @@ def get_indexed_files(vs_id: str) -> set[str]:
     cache = load_cache()
     fps = cache.get("files_per_vs", {})
     return set(fps.get(vs_id, []))
+
+
+def iter_sessions() -> Iterator[Tuple[str, str]]:
+    """
+    Itera sobre as sessões cacheadas, retornando (key, vector_store_id).
+    """
+    cache = load_cache()
+    sessions: dict[str, str] = cache.get("sessions", {})
+    for key, vs_id in sessions.items():
+        yield key, vs_id
 
 
 def list_vector_stores() -> None:

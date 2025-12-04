@@ -9,20 +9,57 @@ from .cache import (
     list_vector_stores,
 )
 from .rag import index_path_or_glob, extend_path_or_glob, ask, chat
-from .config import VECTOR_STORE_CACHE_PATH
+from .config import VECTOR_STORE_CACHE_PATH, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT
 
 
 def print_usage_and_exit() -> None:
     print("Uso:")
     print("  rag-cli index PATH_OR_GLOB")
     print("  rag-cli extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
-    print("  rag-cli ask VECTOR_STORE_ID \"sua pergunta\"")
-    print("  rag-cli ask auto \"sua pergunta\"          # último índice")
-    print("  rag-cli ask PATH_OR_GLOB \"sua pergunta\"  # índice por diretório/glob")
-    print("  rag-cli chat auto                        # chat interativo com último índice")
-    print("  rag-cli chat PATH_OR_GLOB                # chat interativo com índice daquele path")
+    print("  rag-cli ask [--model MODEL] [--system PROMPT] VECTOR_STORE_ID \"sua pergunta\"")
+    print("  rag-cli ask [--model MODEL] [--system PROMPT] auto \"sua pergunta\"")
+    print("  rag-cli ask [--model MODEL] [--system PROMPT] PATH_OR_GLOB \"sua pergunta\"")
+    print("  rag-cli chat [--model MODEL] [--system PROMPT] auto")
+    print("  rag-cli chat [--model MODEL] [--system PROMPT] PATH_OR_GLOB")
+    print("  rag-cli chat [--model MODEL] [--system PROMPT] VECTOR_STORE_ID")
     print("  rag-cli list                             # lista índices cacheados")
+    print()
+    print(f"  Modelo padrão: {DEFAULT_MODEL}")
+    if DEFAULT_SYSTEM_PROMPT:
+        print(f"  System prompt padrão (RAG_CLI_SYSTEM): {DEFAULT_SYSTEM_PROMPT!r}")
     sys.exit(1)
+
+
+def _parse_model_and_system(args: list[str]) -> tuple[list[str], str | None, str | None]:
+    """
+    Faz um parsing bem simples de flags:
+      [--model MODEL] [--system PROMPT] RESTO...
+
+    Retorna (resto_args, model, system_prompt).
+    Não faz nada especial com outras flags (que não existem hoje).
+    """
+    model: str | None = None
+    system: str | None = None
+    i = 0
+    out: list[str] = []
+
+    while i < len(args):
+        a = args[i]
+        if a in ("-m", "--model"):
+            if i + 1 >= len(args):
+                raise SystemExit("Erro: --model requer um argumento.")
+            model = args[i + 1]
+            i += 2
+        elif a in ("-s", "--system"):
+            if i + 1 >= len(args):
+                raise SystemExit("Erro: --system requer um argumento.")
+            system = args[i + 1]
+            i += 2
+        else:
+            out.append(a)
+            i += 1
+
+    return out, model, system
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -66,28 +103,43 @@ def main(argv: list[str] | None = None) -> None:
         save_vector_store_id_for_key(key, vector_store_id)
 
     elif cmd == "ask":
+        # Sintaxe suportada:
+        #   rag-cli ask [--model M] [--system S] TARGET palavras da pergunta...
+        # onde TARGET = auto | vs_... | PATH_OR_GLOB (inclusive qualquer coisa que seu resolve_vector_store_id trate, ex: fzf)
         if len(argv) < 4:
-            print("Uso: rag-cli ask VECTOR_STORE_ID \"sua pergunta\"")
-            print("     rag-cli ask auto \"sua pergunta\"")
-            print("     rag-cli ask PATH_OR_GLOB \"sua pergunta\"")
+            print("Uso: rag-cli ask [--model MODEL] [--system PROMPT] TARGET \"sua pergunta\"")
             sys.exit(1)
 
-        arg2 = argv[2]
+        # fazemos parsing das flags a partir de argv[2:]
+        tail, model_flag, system_flag = _parse_model_and_system(argv[2:])
+        if len(tail) < 2:
+            print("Uso: rag-cli ask [--model MODEL] [--system PROMPT] TARGET \"sua pergunta\"")
+            sys.exit(1)
+
+        arg2 = tail[0]        # TARGET (auto, vs_..., PATH_OR_GLOB, ou o que seu resolve_... aceitar, inclusive fzf)
+        question_words = tail[1:]
         vector_store_id = resolve_vector_store_id(arg2)
-        question = " ".join(argv[3:])
-        answer = ask(vector_store_id, question)
+        question = " ".join(question_words)
+
+        # se system_flag for None, ask() vai usar DEFAULT_SYSTEM_PROMPT internamente
+        answer = ask(vector_store_id, question, model=model_flag, system_prompt=system_flag)
         print(answer)
 
     elif cmd == "chat":
+        # Sintaxe suportada:
+        #   rag-cli chat [--model M] [--system S] TARGET
         if len(argv) < 3:
-            print("Uso: rag-cli chat auto")
-            print("     rag-cli chat PATH_OR_GLOB")
-            print("     rag-cli chat VECTOR_STORE_ID")
+            print("Uso: rag-cli chat [--model MODEL] [--system PROMPT] TARGET")
             sys.exit(1)
 
-        arg2 = argv[2]
+        tail, model_flag, system_flag = _parse_model_and_system(argv[2:])
+        if len(tail) != 1:
+            print("Uso: rag-cli chat [--model MODEL] [--system PROMPT] TARGET")
+            sys.exit(1)
+
+        arg2 = tail[0]   # TARGET
         vector_store_id = resolve_vector_store_id(arg2)
-        chat(vector_store_id)
+        chat(vector_store_id, model=model_flag, system_prompt=system_flag)
 
     elif cmd == "list":
         list_vector_stores()
