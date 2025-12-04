@@ -354,6 +354,77 @@ def index_path_or_glob(path_or_glob):
     return vector_store_id
 
 
+def extend_path_or_glob(vector_store_id, path_or_glob):
+    """
+    Anexa arquivos novos (ou não) a um vector_store já existente,
+    usando um PATH_OR_GLOB arbitrário.
+
+    Não cria novo vector store e não mexe na chave de cache;
+    só envia arquivos para o vector_store_id passado.
+    """
+    expanded = os.path.expanduser(os.path.expandvars(path_or_glob))
+
+    if os.path.isdir(expanded):
+        search_pattern = os.path.join(os.path.abspath(expanded), "**", "*")
+        paths = glob(search_pattern, recursive=True)
+    else:
+        paths = glob(expanded, recursive=True)
+
+    file_paths = []
+    skipped = []
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        ext = os.path.splitext(p)[1].lower()
+        if ext in SUPPORTED_EXTENSIONS:
+            file_paths.append(p)
+        else:
+            skipped.append(p)
+
+    if not file_paths:
+        raise RuntimeError(
+            f"Nenhum arquivo suportado encontrado para: {path_or_glob}\n"
+            f"Extensões suportadas: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+
+    if skipped:
+        print("Ignorando arquivos com extensão não suportada para retrieval:")
+        for p in skipped:
+            print("  ", p)
+        print()
+
+    print(f"Encontrados {len(file_paths)} arquivos suportados para anexar.")
+    show_cost_and_confirm(file_paths)
+
+    print(f"\nAnexando arquivos ao vector store existente: {vector_store_id}")
+    for path in file_paths:
+        tmp_path = None
+        try:
+            upload_path, tmp_path = prepare_file_for_upload(path)
+
+            with open(upload_path, "rb") as fp:
+                file_obj = client.vector_stores.files.upload_and_poll(
+                    vector_store_id=vector_store_id,
+                    file=fp,
+                )
+            print(f"  OK: {path} -> file_id={file_obj.id}")
+
+        except BadRequestError as e:
+            print(f"  ERRO (400) para {path}: {e}")
+
+        except Exception as e:
+            print(f"  ERRO para {path}: {e}")
+
+        finally:
+            if tmp_path:
+                try:
+                    shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
+                except Exception:
+                    pass
+
+    print("Extensão concluída.")
+
+
 # ---------- Pergunta única (ask) ----------
 
 def ask(vector_store_id, question):
@@ -453,6 +524,7 @@ def main(argv):
         print("  python rag_cli.py chat auto                        # chat interativo com último índice")
         print("  python rag_cli.py chat PATH_OR_GLOB                # chat interativo com índice daquele path")
         print("  python rag_cli.py list                             # lista índices cacheados")
+        print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
         sys.exit(1)
 
     cmd = argv[1]
@@ -493,6 +565,35 @@ def main(argv):
         arg2 = argv[2]
         vector_store_id = resolve_vector_store_id(arg2)
         chat(vector_store_id)
+
+    elif cmd == "extend":
+        # Exemplo de uso:
+        #   python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB
+        #
+        # Onde PATH_OR_GLOB_EXISTENTE é a "sessão" já indexada
+        # (a mesma string que você usou no index da primeira vez),
+        # e NOVOS_ARQUIVOS_GLOB é o glob/diretório com os arquivos novos.
+
+        if len(argv) != 4:
+            print("Uso:")
+            print("  python rag_cli.py extend PATH_OR_GLOB_EXISTENTE NOVOS_ARQUIVOS_GLOB")
+            print()
+            print("Exemplo:")
+            print("  python rag_cli.py extend \"$HOME/mdroam\" \"$HOME/mdroam/novas-notas/**/*.org\"")
+            sys.exit(1)
+
+        session_key = argv[2]
+        new_pattern = argv[3]
+
+        # Resolve o vector_store_id da sessão existente
+        vector_store_id = resolve_vector_store_id(session_key)
+
+        # Anexa os novos arquivos ao mesmo vector store
+        extend_path_or_glob(vector_store_id, new_pattern)
+
+        # Opcional: marcar este vector store como o _last no cache
+        key = canonical_key(session_key)
+        save_vector_store_id_for_key(key, vector_store_id)
 
     elif cmd == "list":
         list_vector_stores()
