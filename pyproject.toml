@@ -1,0 +1,9 @@
+[project]
+name = "rag-cli"
+version = "0.1.0"
+description = "Minimal RAG CLI using OpenAI vector stores + file_search"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+	"openai>=1.90.0",
+]
